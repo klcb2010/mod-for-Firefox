@@ -1,5 +1,5 @@
 # .github/workflows/translate.yml
-name: 繁体转简体（自动保存 output.txt 到仓库）
+name: 繁体转简体
 
 on:
   workflow_dispatch:   # 手动触发
