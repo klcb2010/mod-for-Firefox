@@ -1,0 +1,2 @@
+opencc-python-reimplemented
+pdfplumber  # 可选，用于 PDF 处理
