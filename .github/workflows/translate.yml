@@ -1,50 +1,155 @@
-# .github/workflows/translate.yml
-name: 繁体转简体
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+终极版 Android strings.xml 翻译工具
+自动：
+1. 英文 → 简体中文（智能跳过占位符）
+2. 繁体 → 简体
+完美支持 >Move 标记
+"""
 
-on:
-  workflow_dispatch:   # 手动触发
+import sys
+import re
+from pathlib import Path
 
-# 关键：给 GITHUB_TOKEN 写权限，解决所有 403
-permissions:
-  contents: write
+# 繁体转简体
+from opencc import OpenCC
+t2s = OpenCC('t2s')
 
-jobs:
-  convert-and-save:
-    runs-on: ubuntu-latest
-    steps:
-      - name: 拉取仓库代码
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+# 自动英文翻译（离线）
+try:
+    import argostranslate.package
+    import argostranslate.translate
 
-      - name: 设置 Python 环境
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+    # 自动安装 en -> zh 包（只需第一次）
+    from_code = "en"
+    to_code = "zh"
+    argostranslate.package.update_package_index()
+    available_packages = argostranslate.package.get_available_packages()
+    package_to_install = next(
+        filter(lambda x: x.from_code == from_code and x.to_code == to_code, available_packages), None
+    )
+    if package_to_install is not None:
+        argostranslate.package.install_from_path(package_to_install.download())
 
-      - name: 安装 opencc
-        run: pip install opencc-python-reimplemented
+    AUTO_TRANSLATE_AVAILABLE = True
+    print("Argos Translate 加载成功，将自动翻译英文 → 中文")
+except Exception as e:
+    AUTO_TRANSLATE_AVAILABLE = False
+    print(f"警告：Argos Translate 未可用，仅做繁体→简体（错误: {e}）")
+    print("    请运行: pip install argostranslate")
 
-      - name: 执行翻译：input.txt → output.txt
-        run: |
-          echo "正在翻译 input.txt ..."
-          python converter.py input.txt output.txt
-          echo "翻译完成！"
-          echo "========== output.txt 内容预览 =========="
-          cat output.txt
+def has_placeholder(text: str) -> bool:
+    """避免翻译包含占位符的字符串"""
+    return bool(re.search(r'%[0-9]*[sd]|{[^}]+}|@string/|@android:|\\n|\\t|https?://', text))
 
-      - name: 自动提交 output.txt 到仓库根目录
-        run: |
-          git config --global user.name "GitHub Action"
-          git config --global user.email "action@github.com"
-          git add output.txt
-          git commit -m "Auto: 繁体转简体完成 → output.txt（$(date +'%Y-%m-%d %H:%M')）" || echo "无变化，跳过提交"
-          git push
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+def auto_en_to_zh(text: str) -> str:
+    if not AUTO_TRANSLATE_AVAILABLE:
+        return text
+    
+    stripped = text.strip()
+    prefix = ""
+    if stripped.startswith(">"):
+        prefix = ">"
+        stripped = stripped[1:].strip()
+    
+    if not stripped or has_placeholder(stripped):
+        return text
+    
+    # 只在包含英文时才翻译
+    if not re.search(r'[a-zA-Z]', stripped):
+        return text
+    
+    try:
+        translated = argostranslate.translate.translate(stripped, "en", "zh")
+        return prefix + translated.strip()
+    except:
+        return text
 
-      - name: 上传 Artifact（可随时下载）
-        uses: actions/upload-artifact@v4
-        with:
-          name: 翻译结果-output.txt
-          path: output.txt
+def is_android_strings_xml(content: str) -> bool:
+    """智能判断是否是 Android strings.xml 文件"""
+    return bool(re.search(r'<resources>', content) and re.search(r'<string\s+name=', content))
+
+def translate_xml_strings(content: str) -> str:
+    def replace(match):
+        name = match.group(1)
+        value = match.group(2)
+        
+        new_value = auto_en_to_zh(value)
+        new_value = t2s.convert(new_value)  # 再转简体
+        
+        # 如果没变化，至少保证繁体转简体
+        if new_value == value:
+            new_value = t2s.convert(value)
+        
+        return f'<string name="{name}">{new_value}</string>'
+    
+    pattern = r'<string\s+name="([^"]+)"\s*>(.*?)</string>'
+    return re.sub(pattern, replace, content, flags=re.DOTALL)
+
+def convert_file(input_path: Path, output_path: Path):
+    try:
+        content = input_path.read_text(encoding="utf-8")
+        
+        if is_android_strings_xml(content):
+            print(f"检测到 Android strings.xml，正在自动翻译英文 → 中文：{input_path.name}")
+            converted = translate_xml_strings(content)
+        else:
+            converted = t2s.convert(content)
+        
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(converted, encoding="utf-8")
+        print(f"Success: {input_path} → {output_path}")
+        
+        # 预览前几行翻译结果
+        preview_lines = converted.splitlines()[:20]
+        print("\n========== 输出预览（前20行）==========")
+        for line in preview_lines:
+            print(line)
+        print("===================================\n")
+        
+    except Exception as e:
+        print(f"Failed: {input_path} | 错误: {e}")
+
+# ====================== 主逻辑 ======================
+def process_single_file(input_path: Path, output_arg: str):
+    if '.' in Path(output_arg).name:
+        output_path = Path(output_arg)
+    else:
+        output_dir = Path(output_arg)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / input_path.name.replace(input_path.suffix, "_zh.xml" if input_path.suffix == ".xml" else "_zh.txt")
+    
+    convert_file(input_path, output_path)
+
+def batch_process(input_dir: Path, output_dir: Path):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    files = [p for p in input_dir.rglob("*") if p.is_file() and p.suffix.lower() in {".xml", ".txt"}]
+    if not files:
+        print("Warning: 未找到文件")
+        return
+    print(f"发现 {len(files)} 个文件，开始处理...")
+    for f in files:
+        process_single_file(f, str(output_dir))
+    print("All Done!")
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(1)
+    
+    input_arg = sys.argv[1]
+    output_arg = sys.argv[2] if len(sys.argv) >= 3 else "output"
+    
+    input_path = Path(input_arg)
+    if not input_path.exists():
+        print(f"Error: 输入路径不存在: {input_arg}")
+        sys.exit(1)
+    
+    if input_path.is_file():
+        process_single_file(input_path, output_arg)
+    else:
+        batch_process(input_path, Path(output_arg))
+
+if __name__ == "__main__":
+    main()
