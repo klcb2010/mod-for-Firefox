@@ -1,24 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Android strings.xml 英文 → 简体中文翻译工具（固定词典版，准确率高，无需额外安装）
-支持 >Move 标记，智能避开占位符
-同时支持繁体 → 简体
+Android strings.xml 英文 → 简体中文翻译工具（高准确率词典版）
+
+功能：
+- 自动将英文 strings.xml 翻译为简体中文
+- 支持 >Move 标记
+- 智能避开占位符
+- 同时支持繁体 → 简体
+- 无需网络，零额外依赖（只需 opencc）
+
+用法：
+    python converter.py values/strings.xml values-zh-rCN/strings.xml
+    python converter.py res_dir output_dir          # 批量处理目录下所有 xml
 """
 
 import sys
 import re
 from pathlib import Path
 
-# 繁体转简体（需 pip install opencc-python-reimplemented）
+# 繁体 → 简体（可选）
 try:
     from opencc import OpenCC
     t2s = OpenCC('t2s')
 except ImportError:
-    print("警告：未安装 opencc，繁体转简体功能不可用（pip install opencc-python-reimplemented）")
-    def t2s(text): return text
+    print("警告：未安装 opencc-python-reimplemented，繁体转简体功能禁用（pip install opencc-python-reimplemented）")
+    def t2s(text: str) -> str:
+        return text
 
-# 常见 Android 系统字符串翻译词典（来自 AppCompat / Material / 系统官方翻译）
+# 高准确率翻译词典（Android 系统 / AppCompat / Material 常用字符串）
 en_to_zh_dict = {
     "Navigate home": "导航到主页",
     "Navigate up": "向上导航",
@@ -41,7 +51,7 @@ en_to_zh_dict = {
     "Search…": "搜索…",
     "Clear query": "清除查询",
     "Clear search": "清除搜索",
-    "Search": "搜索",
+    "Query": "查询",
     "Close": "关闭",
     "Cancel": "取消",
     "OK": "确定",
@@ -52,103 +62,122 @@ en_to_zh_dict = {
     "Move": "移动",
     "Copy": "复制",
     "Paste": "粘贴",
+    "Cut": "剪切",
     "Share": "分享",
     "Settings": "设置",
-    # 可以继续添加更多...
+    "Refresh": "刷新",
+    "Search": "搜索",
+    "Download": "下载",
+    "Upload": "上传",
+    "Retry": "重试",
+    "Error": "错误",
+    "Loading": "正在加载",
+    "Back": "返回",
+    "Next": "下一步",
+    "Previous": "上一步",
+    "Finish": "完成",
+    # 你可以继续在这里添加更多常用翻译
 }
 
 def has_placeholder(text: str) -> bool:
-    """避开含占位符的字符串"""
-    return bool(re.search(r'%[0-9]*[sd]|{[^}]+}|@string/|@android:|\\.', text))
+    """判断是否包含占位符，避免误翻译"""
+    return bool(re.search(r'%[0-9]*[sdfx]|{[^}]+}|@string/|@android:|\\.', text))
 
-def translate_value(value: str) -> str:
-    stripped = value.strip()
+def translate_value(original_value: str) -> str:
+    value = original_value.strip()
     
-    # 处理 >Move 标记
+    # 处理 >Move 这种标记
     prefix = ""
-    if stripped.startswith(">"):
+    if value.startswith(">"):
         prefix = ">"
-        stripped = stripped[1:].strip()
+        value = value[1:].strip()
     
-    if not stripped or has_placeholder(stripped):
-        return value
+    if not value or has_placeholder(value):
+        return original_value  # 原样返回
     
-    # 直接匹配词典
-    if stripped in en_to_zh_dict:
-        return prefix + en_to_zh_dict[stripped]
+    # 精确匹配
+    if value in en_to_zh_dict:
+        return prefix + en_to_zh_dict[value]
     
-    # 如果是大写短词（如 OFF/ON），尝试匹配
-    lower = stripped.lower()
+    # 大小写不敏感匹配（保留原风格）
+    lower_value = value.lower()
     for en, zh in en_to_zh_dict.items():
-        if en.lower() == lower:
-            # 保持原大小写风格
-            if stripped.isupper():
+        if en.lower() == lower_value:
+            if value.isupper():
                 return prefix + zh.upper()
-            elif stripped.istitle():
+            elif value.istitle():
                 return prefix + zh.capitalize()
             else:
                 return prefix + zh
     
-    # 没匹配上，至少做繁体转简体
-    return prefix + t2s(stripped)
-
-def translate_xml_strings(content: str) -> str:
-    """修复版正则：正确捕获 name 和 value"""
-    def replace(match):
-        name = match.group(1)
-        value = match.group(2)  # 现在能正确拿到内容了！
-        
-        translated = translate_value(value)
-        translated = t2s(translated)  # 保险起见再转一次简体
-        
-        return f'<string name="{name}">{translated}</string>'
-    
-    # 修复的正则：支持空格、换行、属性顺序不同
-    pattern = r'<string\s+name="([^"]+)"[^>]*>(.*?)</string>'
-    return re.sub(pattern, replace, content, flags=re.DOTALL | re.IGNORECASE)
+    # 没匹配到，至少转一次繁体→简体
+    return prefix + t2s(value)
 
 def is_android_strings_xml(content: str) -> bool:
-    return '<resources>' in content and '<string' in content
+    """智能判断是否为 Android strings.xml"""
+    return '<resources>' in content and re.search(r'<string\s+name=', content, re.IGNORECASE)
+
+def translate_xml_strings(content: str) -> str:
+    """精准替换 <string> 标签内容"""
+    def replacer(match):
+        name = match.group(1)
+        value = match.group(2)  # 内容（可能包含换行）
+        translated = translate_value(value)
+        translated = t2s(translated)  # 保险再转一次简体
+        return f'<string name="{name}">{translated}</string>'
+    
+    # 强力正则：支持任意属性顺序、换行、空格
+    pattern = r'<string\s+[^>]*name\s*=\s*"([^"]+)"[^>]*>(.*?)</string>'
+    return re.sub(pattern, replacer, content, flags=re.DOTALL | re.IGNORECASE)
 
 def convert_file(input_path: Path, output_path: Path):
     try:
         content = input_path.read_text(encoding="utf-8")
         
         if is_android_strings_xml(content):
-            print(f"检测到 Android strings.xml，正在翻译：{input_path.name}")
+            print(f"检测到 Android strings.xml，正在翻译 → {input_path.name}")
             converted = translate_xml_strings(content)
         else:
+            print(f"普通文本，仅繁体→简体 → {input_path.name}")
             converted = t2s(content)
         
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(converted, encoding="utf-8")
         print(f"Success: {input_path} → {output_path}")
         
-        print("\n========== 输出预览（前20行）==========")
-        print('\n'.join(converted.splitlines()[:20]))
-        print("===================================\n")
+        # 输出前20行预览
+        print("\n========== 翻译后预览（前20行）==========")
+        lines = converted.splitlines()[:20]
+        for line in lines:
+            print(line.rstrip())
+        print("======================================\n")
         
     except Exception as e:
         print(f"Failed: {input_path} | 错误: {e}")
 
-# 主逻辑（同之前）
+# ==================== 主逻辑 ====================
 def process_single_file(input_path: Path, output_arg: str):
-    if '.' in Path(output_arg).name:
+    if '.' in Path(output_arg).name:  # 用户指定了具体文件名
         output_path = Path(output_arg)
-    else:
+    else:  # 只给了目录
         output_dir = Path(output_arg)
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / input_path.name.replace(".xml", "_zh.xml").replace(".txt", "_zh.txt")
+        output_path = output_dir / input_path.name
     
     convert_file(input_path, output_path)
 
 def batch_process(input_dir: Path, output_dir: Path):
     output_dir.mkdir(parents=True, exist_ok=True)
-    files = [p for p in input_dir.rglob("*.xml")]
-    print(f"发现 {len(files)} 个 XML 文件，开始处理...")
-    for f in files:
-        process_single_file(f, str(output_dir))
-    print("All Done!")
+    xml_files = list(input_dir.rglob("*.xml"))
+    if not xml_files:
+        print("Warning: 目录中未找到 .xml 文件")
+        return
+    print(f"发现 {len(xml_files)} 个 XML 文件，开始批量翻译...")
+    for f in xml_files:
+        rel_path = f.relative_to(input_dir)
+        output_path = output_dir / rel_path
+        convert_file(f, output_path)
+    print("All Done: 批量翻译完成！")
 
 def main():
     if len(sys.argv) < 2:
@@ -160,7 +189,7 @@ def main():
     
     input_path = Path(input_arg)
     if not input_path.exists():
-        print(f"Error: 输入不存在: {input_arg}")
+        print(f"Error: 输入路径不存在: {input_arg}")
         sys.exit(1)
     
     if input_path.is_file():
