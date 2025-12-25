@@ -1,197 +1,150 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Android strings.xml 英文 → 简体中文翻译工具（高准确率词典版）
-
-功能：
-- 自动将英文 strings.xml 翻译为简体中文
-- 支持 >Move 标记
-- 智能避开占位符
-- 同时支持繁体 → 简体
-- 无需网络，零额外依赖（只需 opencc）
-
-用法：
-    python converter.py values/strings.xml values-zh-rCN/strings.xml
-    python converter.py res_dir output_dir          # 批量处理目录下所有 xml
+繁体中文 / 英文 → 简体中文 转换工具
+特性：
+1. 全文：繁体中文 → 简体中文（OpenCC）
+2. XML 特殊规则：仅翻译 >English</string> 中的英文为简体中文
+支持 .txt、.xml、.pdf 等文本类文件
 """
 
+from opencc import OpenCC
+from googletrans import Translator
 import sys
 import re
 from pathlib import Path
 
-# 繁体 → 简体（可选）
+# ---------- 初始化 ----------
+cc = OpenCC('t2s')
+translator = Translator()
+
+# ---------- 可选 PDF 支持 ----------
 try:
-    from opencc import OpenCC
-    t2s = OpenCC('t2s')
+    import pdfplumber
+    PDF_SUPPORT = True
 except ImportError:
-    print("警告：未安装 opencc-python-reimplemented，繁体转简体功能禁用（pip install opencc-python-reimplemented）")
-    def t2s(text: str) -> str:
-        return text
+    PDF_SUPPORT = False
+    print("提示：未安装 pdfplumber，PDF 文件将被跳过")
 
-# 高准确率翻译词典（Android 系统 / AppCompat / Material 常用字符串）
-en_to_zh_dict = {
-    "Navigate home": "导航到主页",
-    "Navigate up": "向上导航",
-    "More options": "更多选项",
-    "Done": "完成",
-    "See all": "查看全部",
-    "Choose an app": "选择应用",
-    "OFF": "关闭",
-    "ON": "开启",
-    "Alt+": "Alt + ",
-    "Ctrl+": "Ctrl + ",
-    "delete": "删除",
-    "enter": "回车",
-    "Function+": "功能键 + ",
-    "Meta+": "Meta + ",
-    "Shift+": "Shift + ",
-    "space": "空格",
-    "Sym+": "符号 + ",
-    "Menu+": "菜单 + ",
-    "Search…": "搜索…",
-    "Clear query": "清除查询",
-    "Clear search": "清除搜索",
-    "Query": "查询",
-    "Close": "关闭",
-    "Cancel": "取消",
-    "OK": "确定",
-    "Yes": "是",
-    "No": "否",
-    "Save": "保存",
-    "Delete": "删除",
-    "Move": "移动",
-    "Copy": "复制",
-    "Paste": "粘贴",
-    "Cut": "剪切",
-    "Share": "分享",
-    "Settings": "设置",
-    "Refresh": "刷新",
-    "Search": "搜索",
-    "Download": "下载",
-    "Upload": "上传",
-    "Retry": "重试",
-    "Error": "错误",
-    "Loading": "正在加载",
-    "Back": "返回",
-    "Next": "下一步",
-    "Previous": "上一步",
-    "Finish": "完成",
-    # 你可以继续在这里添加更多常用翻译
-}
+# ---------- 工具函数 ----------
 
-def has_placeholder(text: str) -> bool:
-    """判断是否包含占位符，避免误翻译"""
-    return bool(re.search(r'%[0-9]*[sdfx]|{[^}]+}|@string/|@android:|\\.', text))
+def is_english(text: str) -> bool:
+    """判断是否为纯英文（含空格）"""
+    return bool(re.fullmatch(r"[A-Za-z0-9 .,_\-]+", text.strip()))
 
-def translate_value(original_value: str) -> str:
-    value = original_value.strip()
-    
-    # 处理 >Move 这种标记
-    prefix = ""
-    if value.startswith(">"):
-        prefix = ">"
-        value = value[1:].strip()
-    
-    if not value or has_placeholder(value):
-        return original_value  # 原样返回
-    
-    # 精确匹配
-    if value in en_to_zh_dict:
-        return prefix + en_to_zh_dict[value]
-    
-    # 大小写不敏感匹配（保留原风格）
-    lower_value = value.lower()
-    for en, zh in en_to_zh_dict.items():
-        if en.lower() == lower_value:
-            if value.isupper():
-                return prefix + zh.upper()
-            elif value.istitle():
-                return prefix + zh.capitalize()
-            else:
-                return prefix + zh
-    
-    # 没匹配到，至少转一次繁体→简体
-    return prefix + t2s(value)
+def translate_en_to_zh(text: str) -> str:
+    """英文 → 简体中文"""
+    try:
+        result = translator.translate(text, src="en", dest="zh-cn")
+        return result.text
+    except Exception:
+        return text  # 翻译失败直接原样返回
 
-def is_android_strings_xml(content: str) -> bool:
-    """智能判断是否为 Android strings.xml"""
-    return '<resources>' in content and re.search(r'<string\s+name=', content, re.IGNORECASE)
+def convert_text_basic(text: str) -> str:
+    """繁体 → 简体"""
+    return cc.convert(text)
 
-def translate_xml_strings(content: str) -> str:
-    """精准替换 <string> 标签内容"""
-    def replacer(match):
-        name = match.group(1)
-        value = match.group(2)  # 内容（可能包含换行）
-        translated = translate_value(value)
-        translated = t2s(translated)  # 保险再转一次简体
-        return f'<string name="{name}">{translated}</string>'
-    
-    # 强力正则：支持任意属性顺序、换行、空格
-    pattern = r'<string\s+[^>]*name\s*=\s*"([^"]+)"[^>]*>(.*?)</string>'
-    return re.sub(pattern, replacer, content, flags=re.DOTALL | re.IGNORECASE)
+def convert_xml_special(content: str) -> str:
+    """
+    仅处理 XML 中 >English</string> 的部分
+    """
 
-def convert_file(input_path: Path, output_path: Path):
+    def repl(match):
+        inner = match.group(1)
+        if is_english(inner):
+            zh = translate_en_to_zh(inner)
+            zh = cc.convert(zh)
+            return f">{zh}</string>"
+        return match.group(0)
+
+    # 精准匹配 >TEXT</string>
+    pattern = re.compile(r">([^<>]+)</string>")
+    return pattern.sub(repl, content)
+
+# ---------- 文件处理 ----------
+
+def convert_txt_or_xml(input_path: Path, output_path: Path):
     try:
         content = input_path.read_text(encoding="utf-8")
-        
-        if is_android_strings_xml(content):
-            print(f"检测到 Android strings.xml，正在翻译 → {input_path.name}")
-            converted = translate_xml_strings(content)
-        else:
-            print(f"普通文本，仅繁体→简体 → {input_path.name}")
-            converted = t2s(content)
-        
+
+        if input_path.suffix.lower() == ".xml":
+            content = convert_xml_special(content)
+
+        content = convert_text_basic(content)
+
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(converted, encoding="utf-8")
+        output_path.write_text(content, encoding="utf-8")
         print(f"Success: {input_path} → {output_path}")
-        
-        # 输出前20行预览
-        print("\n========== 翻译后预览（前20行）==========")
-        lines = converted.splitlines()[:20]
-        for line in lines:
-            print(line.rstrip())
-        print("======================================\n")
-        
+
     except Exception as e:
         print(f"Failed: {input_path} | 错误: {e}")
 
-# ==================== 主逻辑 ====================
+def convert_pdf(input_path: Path, output_path: Path):
+    if not PDF_SUPPORT:
+        print(f"Skip PDF: {input_path}")
+        return
+
+    try:
+        full_text = ""
+        with pdfplumber.open(input_path) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text()
+                if text:
+                    full_text += text + "\n"
+
+        converted = convert_text_basic(full_text)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(converted, encoding="utf-8")
+        print(f"Success PDF → TXT: {input_path} → {output_path}")
+
+    except Exception as e:
+        print(f"Failed PDF: {input_path} | 错误: {e}")
+
+# ---------- 主流程 ----------
+
 def process_single_file(input_path: Path, output_arg: str):
-    if '.' in Path(output_arg).name:  # 用户指定了具体文件名
+    if '.' in Path(output_arg).name:
         output_path = Path(output_arg)
-    else:  # 只给了目录
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
         output_dir = Path(output_arg)
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / input_path.name
-    
-    convert_file(input_path, output_path)
+        output_path = output_dir / f"{input_path.stem}_simplified.txt"
+
+    if input_path.suffix.lower() in {".txt", ".xml", ".json", ".html", ".md"}:
+        convert_txt_or_xml(input_path, output_path)
+    elif input_path.suffix.lower() == ".pdf":
+        convert_pdf(input_path, output_path.with_suffix(".txt"))
+    else:
+        print(f"Skip 不支持的文件类型: {input_path}")
 
 def batch_process(input_dir: Path, output_dir: Path):
     output_dir.mkdir(parents=True, exist_ok=True)
-    xml_files = list(input_dir.rglob("*.xml"))
-    if not xml_files:
-        print("Warning: 目录中未找到 .xml 文件")
-        return
-    print(f"发现 {len(xml_files)} 个 XML 文件，开始批量翻译...")
-    for f in xml_files:
-        rel_path = f.relative_to(input_dir)
-        output_path = output_dir / rel_path
-        convert_file(f, output_path)
-    print("All Done: 批量翻译完成！")
+    supported = {".txt", ".xml", ".json", ".html", ".md", ".pdf"}
+
+    files = [
+        p for p in input_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in supported
+    ]
+
+    print(f"发现 {len(files)} 个文件，开始批量转换...")
+    for f in files:
+        process_single_file(f, str(output_dir))
+    print("All Done!")
 
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
-    
+
     input_arg = sys.argv[1]
     output_arg = sys.argv[2] if len(sys.argv) >= 3 else "output"
-    
+
     input_path = Path(input_arg)
     if not input_path.exists():
         print(f"Error: 输入路径不存在: {input_arg}")
         sys.exit(1)
-    
+
     if input_path.is_file():
         process_single_file(input_path, output_arg)
     else:
