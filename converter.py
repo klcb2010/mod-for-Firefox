@@ -2,9 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-繁体中文 / 英文 → 简体中文
-- 英文翻译：Argos Translate（离线，稳定）
-- 仅翻译 XML 中 >English</string>
+英文 / 繁体 → 简体中文
+仅翻译 XML 中 <string>TEXT</string> 的 TEXT
 """
 
 import sys
@@ -15,7 +14,7 @@ from opencc import OpenCC
 
 cc = OpenCC("t2s")
 
-# ---------- 英文翻译（Argos） ----------
+# ---------- 英文翻译（Argos，必须翻） ----------
 
 def translate_en_to_zh(text: str) -> str:
     try:
@@ -29,15 +28,22 @@ def translate_en_to_zh(text: str) -> str:
     except Exception:
         return text
 
-def is_english(text: str) -> bool:
-    return bool(re.fullmatch(r"[A-Za-z0-9 .,_\-]+", text.strip()))
+def is_ascii_english(text: str) -> bool:
+    """
+    只要是 ASCII 且包含字母，就认为是英文
+    """
+    return (
+        any(c.isalpha() for c in text)
+        and all(ord(c) < 128 for c in text)
+    )
 
-def convert_xml_special(content: str) -> str:
+def convert_xml(content: str) -> str:
     def repl(m):
         inner = m.group(1)
-        if is_english(inner):
+        if is_ascii_english(inner):
             zh = translate_en_to_zh(inner)
-            return f">{cc.convert(zh)}</string>"
+            zh = cc.convert(zh)
+            return f">{zh}</string>"
         return m.group(0)
 
     return re.sub(r">([^<>]+)</string>", repl, content)
@@ -46,9 +52,12 @@ def convert_xml_special(content: str) -> str:
 
 def process_file(inp: Path, out: Path):
     text = inp.read_text(encoding="utf-8")
-    if inp.suffix.lower() == ".xml":
-        text = convert_xml_special(text)
+
+    if inp.suffix.lower() == ".xml" or text.lstrip().startswith("<?xml"):
+        text = convert_xml(text)
+
     text = cc.convert(text)
+
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
     print(f"Translated: {inp} → {out}")
