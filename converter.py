@@ -1,118 +1,108 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
 繁体中文 / 英文 → 简体中文 转换工具
+
 特性：
-1. 全文：繁体中文 → 简体中文（OpenCC）
-2. XML 特殊规则：仅翻译 >English</string> 中的英文为简体中文
-支持 .txt、.xml、.pdf 等文本类文件
+1. 全文：繁体 → 简体（OpenCC）
+2. XML 特例：仅翻译 >English</string> 中的英文
+3. googletrans 缺失时自动降级，不报错
 """
 
-from opencc import OpenCC
-from googletrans import Translator
 import sys
 import re
 from pathlib import Path
+from opencc import OpenCC
 
-# ---------- 初始化 ----------
-cc = OpenCC('t2s')
-translator = Translator()
+# ---------- OpenCC ----------
+cc = OpenCC("t2s")
 
-# ---------- 可选 PDF 支持 ----------
+# ---------- Google Translate（可选） ----------
+try:
+    from googletrans import Translator
+    translator = Translator()
+    HAS_TRANSLATOR = True
+except Exception:
+    translator = None
+    HAS_TRANSLATOR = False
+    print("提示：未安装 googletrans，英文翻译功能已自动禁用")
+
+# ---------- PDF 支持（可选） ----------
 try:
     import pdfplumber
     PDF_SUPPORT = True
 except ImportError:
     PDF_SUPPORT = False
-    print("提示：未安装 pdfplumber，PDF 文件将被跳过")
 
 # ---------- 工具函数 ----------
 
 def is_english(text: str) -> bool:
-    """判断是否为纯英文（含空格）"""
     return bool(re.fullmatch(r"[A-Za-z0-9 .,_\-]+", text.strip()))
 
 def translate_en_to_zh(text: str) -> str:
-    """英文 → 简体中文"""
+    if not HAS_TRANSLATOR:
+        return text
     try:
-        result = translator.translate(text, src="en", dest="zh-cn")
-        return result.text
+        return translator.translate(text, src="en", dest="zh-cn").text
     except Exception:
-        return text  # 翻译失败直接原样返回
+        return text
 
-def convert_text_basic(text: str) -> str:
-    """繁体 → 简体"""
+def convert_basic(text: str) -> str:
     return cc.convert(text)
 
 def convert_xml_special(content: str) -> str:
-    """
-    仅处理 XML 中 >English</string> 的部分
-    """
-
     def repl(match):
         inner = match.group(1)
         if is_english(inner):
             zh = translate_en_to_zh(inner)
-            zh = cc.convert(zh)
-            return f">{zh}</string>"
+            return f">{cc.convert(zh)}</string>"
         return match.group(0)
 
-    # 精准匹配 >TEXT</string>
-    pattern = re.compile(r">([^<>]+)</string>")
-    return pattern.sub(repl, content)
+    return re.sub(r">([^<>]+)</string>", repl, content)
 
 # ---------- 文件处理 ----------
 
-def convert_txt_or_xml(input_path: Path, output_path: Path):
-    try:
-        content = input_path.read_text(encoding="utf-8")
+def convert_text_file(input_path: Path, output_path: Path):
+    content = input_path.read_text(encoding="utf-8")
 
-        if input_path.suffix.lower() == ".xml":
-            content = convert_xml_special(content)
+    if input_path.suffix.lower() == ".xml":
+        content = convert_xml_special(content)
 
-        content = convert_text_basic(content)
+    content = convert_basic(content)
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(content, encoding="utf-8")
-        print(f"Success: {input_path} → {output_path}")
-
-    except Exception as e:
-        print(f"Failed: {input_path} | 错误: {e}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(content, encoding="utf-8")
+    print(f"Success: {input_path} → {output_path}")
 
 def convert_pdf(input_path: Path, output_path: Path):
     if not PDF_SUPPORT:
-        print(f"Skip PDF: {input_path}")
+        print(f"Skip PDF（未安装 pdfplumber）: {input_path}")
         return
 
-    try:
-        full_text = ""
-        with pdfplumber.open(input_path) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text()
-                if text:
-                    full_text += text + "\n"
+    text = ""
+    with pdfplumber.open(input_path) as pdf:
+        for page in pdf.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
 
-        converted = convert_text_basic(full_text)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(converted, encoding="utf-8")
-        print(f"Success PDF → TXT: {input_path} → {output_path}")
-
-    except Exception as e:
-        print(f"Failed PDF: {input_path} | 错误: {e}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(convert_basic(text), encoding="utf-8")
+    print(f"Success PDF → TXT: {input_path} → {output_path}")
 
 # ---------- 主流程 ----------
 
-def process_single_file(input_path: Path, output_arg: str):
-    if '.' in Path(output_arg).name:
+def process_single(input_path: Path, output_arg: str):
+    if "." in Path(output_arg).name:
         output_path = Path(output_arg)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
     else:
         output_dir = Path(output_arg)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"{input_path.stem}_simplified.txt"
 
     if input_path.suffix.lower() in {".txt", ".xml", ".json", ".html", ".md"}:
-        convert_txt_or_xml(input_path, output_path)
+        convert_text_file(input_path, output_path)
     elif input_path.suffix.lower() == ".pdf":
         convert_pdf(input_path, output_path.with_suffix(".txt"))
     else:
@@ -120,33 +110,20 @@ def process_single_file(input_path: Path, output_arg: str):
 
 def batch_process(input_dir: Path, output_dir: Path):
     output_dir.mkdir(parents=True, exist_ok=True)
-    supported = {".txt", ".xml", ".json", ".html", ".md", ".pdf"}
-
-    files = [
-        p for p in input_dir.rglob("*")
-        if p.is_file() and p.suffix.lower() in supported
-    ]
-
-    print(f"发现 {len(files)} 个文件，开始批量转换...")
-    for f in files:
-        process_single_file(f, str(output_dir))
-    print("All Done!")
+    for f in input_dir.rglob("*"):
+        if f.is_file():
+            process_single(f, str(output_dir))
 
 def main():
     if len(sys.argv) < 2:
-        print(__doc__)
+        print("用法: python converter.py input [output]")
         sys.exit(1)
 
-    input_arg = sys.argv[1]
-    output_arg = sys.argv[2] if len(sys.argv) >= 3 else "output"
-
-    input_path = Path(input_arg)
-    if not input_path.exists():
-        print(f"Error: 输入路径不存在: {input_arg}")
-        sys.exit(1)
+    input_path = Path(sys.argv[1])
+    output_arg = sys.argv[2] if len(sys.argv) > 2 else "output"
 
     if input_path.is_file():
-        process_single_file(input_path, output_arg)
+        process_single(input_path, output_arg)
     else:
         batch_process(input_path, Path(output_arg))
 
