@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
+
 繁体中文 / 英文 → 简体中文 转换工具
 特性：
 1. 全文：繁体中文 → 简体中文（OpenCC）
